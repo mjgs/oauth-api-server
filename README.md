@@ -1,11 +1,11 @@
-# OAuth 2.0 Books API Demo
+# OAuth API Server - OAuth 2.0 Books API server Demo
 
-A complete demonstration of OAuth 2.0 Authorization Code flow with a Books REST API and client application.
+A complete demonstration of OAuth 2.0 Authorization Code flow with a Books REST API server.
 
 ## Architecture
 
 - **API Server (Port 3000)**: OAuth 2.0 Authorization Server + Books/Users REST API
-- **Client App (Port 3001)**: Express app that acts as OAuth client with server-side credential handling
+- **Client App (Port 3001)**: Express app that acts as OAuth client with server-side credential handling (See [oauth-api-client](https://github.com/mjgs/oauth-api-client) repo)
 
 ## Features
 
@@ -23,32 +23,17 @@ A complete demonstration of OAuth 2.0 Authorization Code flow with a Books REST 
 - ✅ Scope-based endpoint protection
 - ✅ Public read endpoints, authenticated write endpoints
 
-### Client Application
-- ✅ Server-side OAuth flow handling (secure credential storage)
-- ✅ User profile management
-- ✅ Books management interface
-- ✅ Automatic token refresh
-- ✅ Clean, responsive UI
-
 ## Quick Start
 
 ### 1. Install Dependencies
 
 **API Server:**
 ```bash
-cd api-server
-npm install
-```
-
-**Client App:**
-```bash
-cd client-app
 npm install
 ```
 
 ### 2. Start API Server
 ```bash
-cd api-server
 npm start
 ```
 Server will run on http://localhost:3000
