@@ -191,53 +191,84 @@ app.get('/oauth/authorize', (req, res) => {
   // In a real app, you'd redirect to a login page
   // For demo purposes, we'll return a simple HTML form
   const scopeList = scope ? scope.split(' ') : [];
-  
+
   res.send(`
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Authorize Application</title>
-        <style>
-            body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; }
-            .form-group { margin-bottom: 15px; }
-            label { display: block; margin-bottom: 5px; }
-            input, button { padding: 8px; width: 100%; }
-            button { background: #007bff; color: white; border: none; cursor: pointer; }
-            button:hover { background: #0056b3; }
-            .scopes { background: #f8f9fa; padding: 15px; border-radius: 5px; }
-        </style>
+      <title>Authorize Application</title>
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          max-width: 500px;
+          margin: 50px auto;
+          padding: 20px;
+        }
+
+        .form-group {
+          margin-bottom: 15px;
+        }
+
+        label {
+          display: block;
+          margin-bottom: 5px;
+        }
+
+        input,
+        button {
+          padding: 8px;
+          width: 100%;
+        }
+
+        button {
+          background: #007bff;
+          color: white;
+          border: none;
+          cursor: pointer;
+        }
+
+        button:hover {
+          background: #0056b3;
+        }
+
+        .scopes {
+          background: #f8f9fa;
+          padding: 15px;
+          border-radius: 5px;
+        }
+      </style>
     </head>
     <body>
-        <h2>Authorize ${client.name}</h2>
-        <p>This application is requesting access to your account.</p>
-        
-        <div class="scopes">
-            <h3>Requested Permissions:</h3>
-            <ul>
-                ${scopeList.map(s => `<li>${SCOPES[s] || s}</li>`).join('')}
-            </ul>
+      <h2>Authorize ${client.name}</h2>
+      <p>This application is requesting access to your account.</p>
+
+      <div class="scopes">
+        <h3>Requested Permissions:</h3>
+        <ul>
+          ${scopeList.map(s => `<li>${SCOPES[s] || s}</li>`).join('')}
+        </ul>
+      </div>
+
+      <form method="POST" action="/oauth/authorize">
+        <input type="hidden" name="client_id" value="${client_id}">
+        <input type="hidden" name="redirect_uri" value="${redirect_uri}">
+        <input type="hidden" name="response_type" value="${response_type}">
+        <input type="hidden" name="scope" value="${scope || ''}">
+        <input type="hidden" name="state" value="${state || ''}">
+
+        <div class="form-group">
+          <label for="username">Username:</label>
+          <input type="text" id="username" name="username" required>
         </div>
 
-        <form method="POST" action="/oauth/authorize">
-            <input type="hidden" name="client_id" value="${client_id}">
-            <input type="hidden" name="redirect_uri" value="${redirect_uri}">
-            <input type="hidden" name="response_type" value="${response_type}">
-            <input type="hidden" name="scope" value="${scope || ''}">
-            <input type="hidden" name="state" value="${state || ''}">
-            
-            <div class="form-group">
-                <label for="username">Username:</label>
-                <input type="text" id="username" name="username" required>
-            </div>
-            
-            <div class="form-group">
-                <label for="password">Password:</label>
-                <input type="password" id="password" name="password" required>
-            </div>
-            
-            <button type="submit" name="action" value="authorize">Authorize</button>
-            <button type="submit" name="action" value="deny" style="background: #dc3545; margin-top: 10px;">Deny</button>
-        </form>
+        <div class="form-group">
+          <label for="password">Password:</label>
+          <input type="password" id="password" name="password" required>
+        </div>
+
+        <button type="submit" name="action" value="authorize">Authorize</button>
+        <button type="submit" name="action" value="deny" style="background: #dc3545; margin-top: 10px;">Deny</button>
+      </form>
     </body>
     </html>
   `);
@@ -368,7 +399,7 @@ app.post('/oauth/token', async (req, res) => {
 // OAuth 2.0 Token Introspection Endpoint
 app.post('/oauth/introspect', (req, res) => {
   const { token } = req.body;
-  
+
   const tokenData = accessTokens.get(token);
   if (!tokenData || tokenData.expiresAt < Date.now()) {
     return res.json({ active: false });
@@ -399,7 +430,7 @@ app.get('/api/users/:id', (req, res) => {
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
-  
+
   res.json({
     id: user.id,
     username: user.username,
@@ -415,7 +446,7 @@ app.get('/api/me', authenticateToken, requireScope('read:profile'), (req, res) =
 app.put('/api/me', authenticateToken, requireScope('write:profile'), (req, res) => {
   const { name, email } = req.body;
   const user = users.find(u => u.id === req.user.id);
-  
+
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
@@ -451,7 +482,7 @@ app.get('/api/my-books', authenticateToken, requireScope('read:books'), (req, re
 
 app.post('/api/books', authenticateToken, requireScope('write:books'), (req, res) => {
   const { title, author } = req.body;
-  
+
   if (!title || !author) {
     return res.status(400).json({ error: 'Title and author are required' });
   }
@@ -469,7 +500,7 @@ app.post('/api/books', authenticateToken, requireScope('write:books'), (req, res
 
 app.put('/api/books/:id', authenticateToken, requireScope('write:books'), (req, res) => {
   const bookIndex = books.findIndex(b => b.id === req.params.id);
-  
+
   if (bookIndex === -1) {
     return res.status(404).json({ error: 'Book not found' });
   }
@@ -488,7 +519,7 @@ app.put('/api/books/:id', authenticateToken, requireScope('write:books'), (req, 
 
 app.delete('/api/books/:id', authenticateToken, requireScope('write:books'), (req, res) => {
   const bookIndex = books.findIndex(b => b.id === req.params.id);
-  
+
   if (bookIndex === -1) {
     return res.status(404).json({ error: 'Book not found' });
   }
