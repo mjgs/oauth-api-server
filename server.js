@@ -99,6 +99,28 @@ function requireScope(scope) {
   };
 }
 
+// Client admin endpoints
+app.get('/admin/clients', (req, res) => {
+  // We only send the client IDs (keys of the map), not the secrets.
+  const clientIds = Array.from(clients.keys());
+  res.status(200).json(clientIds);
+});
+
+app.delete('/admin/clients/:clientId', (req, res) => {
+  const clientIdToDelete = req.params.clientId;
+
+  // Delete the client from the 'clients' Map
+  const wasDeleted = clients.delete(clientIdToDelete);
+
+  if (wasDeleted) {
+    console.log(`Deleted credentials for Client ID: ${clientIdToDelete}`);
+    res.status(204).send(); // No Content, successful deletion
+  } else {
+    console.log(`Client ID not found for deletion: ${clientIdToDelete}`);
+    res.status(404).json({ message: 'Client ID not found.' });
+  }
+});
+
 // Client Registration Endpoints
 app.post('/oauth/clients', (req, res) => {
   const { name, redirectUris, scopes } = req.body;
