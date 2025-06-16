@@ -47,22 +47,11 @@ Server will run on http://localhost:3000
    - **Scopes**: Select all available scopes
 3. Save the generated `CLIENT_ID` and `CLIENT_SECRET`
 
-### 4. Configure Client App
+### 4. Configure and Start Client App
 
-Edit `client-app/server.js` and update:
-```javascript
-const CLIENT_ID = 'your-client-id-here';
-const CLIENT_SECRET = 'your-client-secret-here';
-```
+See client repo [oauth-api-client](https://github.com/mjgs/oauth-api-client).
 
-### 5. Start Client App
-```bash
-cd client-app
-npm start
-```
-Client will run on http://localhost:3001
-
-### 6. Test the Flow
+### 5. Test the Flow
 
 1. Visit http://localhost:3001
 2. Click "Login with OAuth"
@@ -124,7 +113,7 @@ Client will run on http://localhost:3001
 ## Development Notes
 
 ### Adding New Scopes
-1. Add scope to `SCOPES` object in `api-server/server.js`
+1. Add scope to `SCOPES` object in `server.js`
 2. Update admin interface to include new scope
 3. Add scope validation to relevant endpoints
 
