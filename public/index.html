@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JWT Demo - Home</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: "Inter", sans-serif; }
+    .container { max-width: 800px; }
+    .token-display {
+      background-color: #e2e8f0; /* Light gray-blue */
+      padding: 12px;
+      border-radius: 8px;
+      word-break: break-all; /* Ensures long tokens wrap */
+      font-family: 'Roboto Mono', monospace; /* Monospaced font for tokens */
+      font-size: 0.85rem;
+      color: #2d3748; /* Darker gray for text */
+      white-space: pre-wrap; /* Preserve whitespace and wrap */
+    }
+    .copy-button {
+      background-color: #4f46e5; /* Indigo */
+      color: white;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+    .copy-button:hover {
+      background-color: #4338ca; /* Darker indigo */
+    }
+    .copied-message {
+      margin-left: 8px;
+      font-size: 0.75rem;
+      color: #10b981; /* Green for success */
+      display: none; /* Hidden by default */
+    }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
+  <div class="container bg-white p-8 rounded-lg shadow-xl w-full">
+    <h1 class="text-4xl font-extrabold text-gray-900 mb-6 text-center">Unified JWT Authentication Demo</h1>
+    <p class="text-gray-700 mb-8 text-center text-lg">Explore different authentication and authorization flows with JWTs, backed by a Node.js Express API.</p>
+
+    <div class="space-y-8">
+      <!-- Mock Login for Demo (to get a user token for PATs) -->
+      <div class="p-6 border border-blue-300 rounded-xl bg-blue-50 shadow-md">
+        <h2 class="text-2xl font-bold text-blue-800 mb-4">1. Mock User Login (for PAT Management)</h2>
+        <p class="text-gray-700 mb-4 text-sm">Use this to simulate logging in as a user. This grants you a short-lived user token which is required to generate Personal Access Tokens (PATs) on the PAT Management page.</p>
+        <ul class="list-disc list-inside text-sm text-gray-600 mb-4">
+          <li><strong><code>testuser</code></strong> / <strong><code>password123</code></strong> (User Role)</li>
+          <li><strong><code>adminuser</code></strong> / <strong><code>adminpass</code></strong> (Admin Role)</li>
+        </ul>
+        <div class="flex flex-col space-y-3">
+          <input type="text" id="username" placeholder="Username" class="p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 shadow-sm">
+          <input type="password" id="password" placeholder="Password" class="p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 shadow-sm">
+          <button id="loginBtn" class="bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition duration-300 shadow-lg text-lg font-semibold">Login to get User Token</button>
+        </div>
+        <p id="loginStatus" class="mt-4 text-sm text-center text-gray-500"></p>
+        <div id="userTokenDisplay" class="mt-4 token-display hidden">
+          <strong class="text-gray-700 block mb-2">Your User Token (short-lived):</strong>
+          <span id="userTokenValue" class="block text-gray-800"></span>
+          <button class="copy-button mt-2" onclick="copyToClipboard('userTokenValue', 'userTokenCopied')">Copy Token</button>
+          <span id="userTokenCopied" class="copied-message">Copied!</span>
+        </div>
+      </div>
+
+      <!-- Access API Endpoints Directly -->
+      <div class="p-6 border border-green-300 rounded-xl bg-green-50 shadow-md">
+        <h2 class="text-2xl font-bold text-green-800 mb-4">2. Access API Endpoints Directly</h2>
+        <p class="text-gray-700 mb-4 text-sm">Test protected API endpoints by manually pasting a JWT into the field below. You can get a user token from the "Mock Login" above, or obtain other tokens (PAT, API Key) via Postman/cURL using the `/oauth/token` or `/api/pat/generate` endpoints.</p>
+        <input type="text" id="apiTokenInput" placeholder="Paste your JWT (Access Token, PAT, or API Key) here" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500 shadow-sm mb-4">
+        <div class="flex flex-col space-y-3">
+          <button onclick="callApi('/api/data/public')" class="bg-gray-600 text-white p-3 rounded-lg hover:bg-gray-700 transition duration-300 shadow-lg text-lg font-semibold">Call Public API</button>
+          <button onclick="callApi('/api/data/protected')" class="bg-green-600 text-white p-3 rounded-lg hover:bg-green-700 transition duration-300 shadow-lg text-lg font-semibold">Call Protected API</button>
+          <button onclick="callApi('/api/data/admin')" class="bg-red-600 text-white p-3 rounded-lg hover:bg-red-700 transition duration-300 shadow-lg text-lg font-semibold">Call Admin API</button>
+        </div>
+        <p id="apiResponse" class="mt-4 text-sm text-left token-display"></p>
+      </div>
+
+      <!-- OAuth Web Client Demo (External App) -->
+      <div class="p-6 border border-purple-300 rounded-xl bg-purple-50 shadow-md">
+        <h2 class="text-2xl font-bold text-purple-800 mb-4">3. OAuth 2.0 Web Client Demo (External App)</h2>
+        <p class="text-gray-700 mb-4 text-sm">This API acts as an Authorization Server. To see the full OAuth flow (Authorization Code Grant with PKCE) in action, you'll need to run a **separate web client application**. This client will redirect to this API's <code>/oauth/authorize</code> endpoint. Ensure the client's <code>redirect_uri</code> is correctly registered in this API's <code>server.js</code> file.</p>
+        <p class="text-gray-700 mb-4 text-sm">A reference client implementation can be found here:</p>
+        <a href="https://github.com/mjgs/oauth-api-client" target="_blank" class="block text-center bg-purple-600 text-white p-3 rounded-lg hover:bg-purple-700 transition duration-300 shadow-lg text-lg font-semibold">Go to OAuth Web Client Repo</a>
+      </div>
+
+      <!-- PAT Management Page -->
+      <div class="p-6 border border-yellow-300 rounded-xl bg-yellow-50 shadow-md">
+        <h2 class="text-2xl font-bold text-yellow-800 mb-4">4. Personal Access Token (PAT) Management</h2>
+        <p class="text-gray-700 mb-4 text-sm">Navigate to the dedicated PAT management page to generate and revoke user-specific tokens. You must perform the mock login above first to be 'authenticated' for this page.</p>
+        <a href="/pat-management" class="block text-center bg-yellow-600 text-white p-3 rounded-lg hover:bg-yellow-700 transition duration-300 shadow-lg text-lg font-semibold">Go to PAT Management Page</a>
+      </div>
+
+      <!-- Admin Panel -->
+      <div class="p-6 border border-gray-300 rounded-xl bg-gray-100 shadow-md">
+        <h2 class="text-2xl font-bold text-gray-800 mb-4">5. Admin Panel</h2>
+        <p class="text-gray-700 mb-4 text-sm">Access the administrative panel. This endpoint requires an 'admin' role, which you can obtain by logging in with <code>adminuser</code>/<code>adminpass</code> and then using its generated token for the protected API call above.</p>
+        <a href="/admin-panel" class="block text-center bg-gray-400 text-white p-3 rounded-lg hover:bg-gray-500 transition duration-300 shadow-lg text-lg font-semibold">Go to Admin Panel</a>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('loginBtn').addEventListener('click', async () => {
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+      const loginStatus = document.getElementById('loginStatus');
+      const userTokenDisplay = document.getElementById('userTokenDisplay');
+      const userTokenValue = document.getElementById('userTokenValue');
+
+      loginStatus.textContent = 'Logging in...';
+      loginStatus.className = 'mt-4 text-sm text-center text-gray-500';
+      userTokenDisplay.classList.add('hidden');
+      userTokenValue.textContent = ''; // Clear previous token
+
+      try {
+        const response = await fetch('/mock-login', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ username, password })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          loginStatus.textContent = data.message;
+          loginStatus.className = 'mt-4 text-sm text-center text-green-600';
+          userTokenValue.textContent = data.userToken;
+          userTokenDisplay.classList.remove('hidden');
+          // Store the user token in sessionStorage to make it available on PAT page
+          sessionStorage.setItem('userToken', data.userToken);
+        } else {
+          loginStatus.textContent = `Error: ${data.error || data.message}`;
+          loginStatus.className = 'mt-4 text-sm text-center text-red-600';
+        }
+      } catch (error) {
+        loginStatus.textContent = `Network error: ${error.message}`;
+        loginStatus.className = 'mt-4 text-sm text-center text-red-600';
+      }
+    });
+
+    async function callApi(endpoint) {
+      const apiToken = document.getElementById('apiTokenInput').value;
+      const apiResponseElement = document.getElementById('apiResponse');
+      apiResponseElement.textContent = 'Calling API...';
+      apiResponseElement.className = 'mt-4 text-sm text-left token-display text-gray-500';
+
+      const headers = {};
+      if (apiToken) {
+        headers['Authorization'] = `Bearer ${apiToken}`;
+      }
+
+      try {
+        const response = await fetch(endpoint, { headers });
+        const data = await response.json();
+        apiResponseElement.textContent = JSON.stringify(data, null, 2); // Pretty print JSON
+        if (response.ok) {
+          apiResponseElement.className = 'mt-4 text-sm text-left token-display text-green-800';
+        } else {
+          apiResponseElement.className = 'mt-4 text-sm text-left token-display text-red-800';
+        }
+      } catch (error) {
+        apiResponseElement.textContent = `Network error: ${error.message}`;
+        apiResponseElement.className = 'mt-4 text-sm text-left token-display text-red-800';
+      }
+    }
+
+    function copyToClipboard(elementId, messageId) {
+      const element = document.getElementById(elementId);
+      const message = document.getElementById(messageId);
+      const textToCopy = element.textContent;
+
+      // Use Clipboard API if available and secure context (HTTPS)
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(textToCopy).then(() => {
+          message.style.display = 'inline';
+          setTimeout(() => message.style.display = 'none', 2000);
+        }).catch(err => {
+          console.error('Failed to copy text using Clipboard API:', err);
+          fallbackCopyTextToClipboard(textToCopy, message);
+        });
+      } else {
+        // Fallback for non-secure contexts or older browsers
+        fallbackCopyTextToClipboard(textToCopy, message);
+      }
+    }
+
+    function fallbackCopyTextToClipboard(text, messageElement) {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed"; // Avoid scrolling to bottom
+      textArea.style.left = "-9999px";
+      textArea.style.top = "-9999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        messageElement.style.display = 'inline';
+        setTimeout(() => messageElement.style.display = 'none', 2000);
+      } catch (err) {
+        console.error('Failed to copy text using execCommand:', err);
+        alert('Failed to copy token. Please copy it manually.');
+      }
+      document.body.removeChild(textArea);
+    }
+  </script>
+</body>
+</html>

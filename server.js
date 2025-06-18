@@ -1,853 +1,682 @@
+// server.js
 const express = require('express');
-const cors = require('cors');
-const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
-const { v4: uuidv4 } = require('uuid');
-const url = require('url');
-const querystring = require('querystring');
+const bodyParser = require('body-parser');
+
+// Import helper functions
+const {
+  isInvalidOrExpiredTokenError,
+  authHasRequiredRole,
+  isValidAuthCodeRequest,
+  isValidAuthCodeTokenRequest,
+  isValidStoredAuthCode,
+  isValidRefreshTokenRequest,
+  isValidStoredRefreshToken,
+  isValidClientCredentialsRequest,
+  isValidClientCredentials,
+  generateAccessToken,
+  generateSecureTokenString,
+  generateCodeChallenge,
+  sha256
+} = require('./utils/authHelpers');
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cors());
+const port = 3000;
 
-// JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key';
-const REFRESH_SECRET = process.env.REFRESH_SECRET || 'your-super-secret-refresh-key';
+// JWT Signing Algorithm: RS256
+//
+// Instructions for generating private.pem and public.pem:
+// Open a terminal and run the following commands in the root directory of this project:
+// a) Generate a private key (2048-bit RSA key):
+//    openssl genpkey -algorithm RSA -out private.pem -pkeyopt rsa_keygen_bits:2048
+// b) Extract the public key from the private key:
+//    openssl rsa -pubout -in private.pem -out public.pem
+// Ensure these two files (private.pem, public.pem) are in the same directory as server.js.
+try {
+  const privateKeyPath = path.join(__dirname, 'private.pem');
+  const publicKeyPath = path.join(__dirname, 'public.pem');
 
-// In-memory data stores
-const users = [
-  {
-    id: '1',
-    username: 'john_doe',
-    email: 'john@example.com',
-    password: bcrypt.hashSync('password123', 10),
-    name: 'John Doe'
-  },
-  {
-    id: '2',
-    username: 'jane_smith',
-    email: 'jane@example.com',
-    password: bcrypt.hashSync('password123', 10),
-    name: 'Jane Smith'
+  if (!fs.existsSync(privateKeyPath) || !fs.existsSync(publicKeyPath)) {
+    console.warn('WARNING: private.pem or public.pem not found. Please generate them using the OpenSSL commands in the comments.');
+    console.warn('Application will start, but token signing/verification will fail until keys are present.');
   }
-];
 
-const books = [
-  { id: '1', title: '1984', author: 'George Orwell', userId: '1' },
-  { id: '2', title: 'To Kill a Mockingbird', author: 'Harper Lee', userId: '1' },
-  { id: '3', title: 'Pride and Prejudice', author: 'Jane Austen', userId: '2' }
-];
+  app.locals.privateKey = fs.readFileSync(privateKeyPath, 'utf8');
+  app.locals.publicKey = fs.readFileSync(publicKeyPath, 'utf8');
 
-// OAuth 2.0 stores
+} catch (error) {
+  console.error('Error loading private/public keys:', error.message);
+  console.error('Please ensure private.pem and public.pem exist in the root directory.');
+  return process.exit(1); // Exit if keys are critical for startup
+}
+
+// The issuer (iss) claim identifies the principal that issued the JWT.
+// In a production environment, this would typically be your authentication server's domain.
+// For local development, it defaults to the local server address.
+// To set this, use: export JWT_ISSUER="https://your.auth.domain.com"
+const JWT_ISSUER = process.env.JWT_ISSUER || `http://localhost:${port}`;
+
+// JWT Token Types
+// Using an object with Object.freeze() to create an immutable enum-like structure
+const TOKEN_TYPES = Object.freeze({
+  MOCK_LOGIN: 'MOCK_LOGIN',
+  OAUTH: 'OAUTH',
+  API_KEY: 'API_KEY',
+  PAT: 'PAT',
+});
+
+// Data Stores (will reset when the server restarts)
+//
+// - users: User accounts ({ id, username, passwordHash, roles })
+// - clients: Client applications ({ id, secret, redirectUris, scope })
+// - authorizationCodes: Temporary OAuth authorization codes
+//   ({ code, clientId, userId, redirectUri, codeChallenge, codeChallengeMethod, scopes, expiresAt })
+// - refreshTokens: OAuth refresh tokens
+//   ({ token, userId, clientId, scopes, expiresAt })
+// - personalAccessTokens: Personal Access Tokens (PATs) for revocation tracking
+//   ({ jti, userId, scopes, expiresAt })
+const users = new Map();
 const clients = new Map();
 const authorizationCodes = new Map();
-const accessTokens = new Map();
 const refreshTokens = new Map();
+const personalAccessTokens = new Map();
 
-// Available scopes
-const SCOPES = {
-  'read:profile': 'Read user profile',
-  'write:profile': 'Write user profile',
-  'read:books': 'Read books',
-  'write:books': 'Write books'
-};
-
-// Helper Functions
-function generateToken() {
-  return crypto.randomBytes(32).toString('hex');
-}
-
-function validateScope(requestedScopes, clientScopes) {
-  const requested = requestedScopes ? requestedScopes.split(' ') : [];
-  const allowed = clientScopes || [];
-  return requested.every(scope => allowed.includes(scope));
-}
-
-function hasScope(token, requiredScope) {
-  const tokenData = accessTokens.get(token);
-  if (!tokenData) return false;
-  return tokenData.scopes.includes(requiredScope);
-}
+app.use(bodyParser.json()); // To parse JSON request bodies
+app.use(bodyParser.urlencoded({ extended: true })); // To parse URL-encoded request bodies
+app.use(express.static(path.join(__dirname, 'public'))); // Serve static HTML files from the 'public' directory
 
 // Middleware
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
 
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
+const authenticateJWT = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      error: 'unauthorized',
+      message: 'No bearer token provided.'
+    });
   }
 
-  const tokenData = accessTokens.get(token);
-  if (!tokenData || tokenData.expiresAt < Date.now()) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
+  const token = authHeader.split(' ')[1]; // Extract the token part
 
-  req.user = tokenData.user;
-  req.scopes = tokenData.scopes;
-  next();
-}
-
-function requireScope(scope) {
-  return (req, res, next) => {
-    if (!req.scopes || !req.scopes.includes(scope)) {
-      return res.status(403).json({ error: `Insufficient scope. Required: ${scope}` });
+  jwt.verify(token, app.locals.publicKey, { algorithms: ['RS256'] }, (err, decoded) => {
+    if (err) {
+      console.error("JWT verification error:", err.message);
+      // Specific error messages for clarity
+      if (isInvalidOrExpiredTokenError(err)) {
+        const errorMessage = err.name === 'TokenExpiredError' ? 'Token expired.' : 'Invalid token signature or malformed token.';
+        return res.status(401).json({ error: 'unauthorized', message: errorMessage });
+      }
+      return res.status(401).json({
+        error: 'unauthorized', 
+        message: 'Invalid token.'
+      });
     }
-    next();
-  };
-}
+    // Check for PAT revocation (if jti exists and is in blacklist/not in active map)
+    if (decoded.type === TOKEN_TYPES.PAT && decoded.jti && !personalAccessTokens.has(decoded.jti)) {
+      console.log(`Attempt to use revoked PAT: ${decoded.jti}`);
+      return res.status(401).json({ 
+        error: 'unauthorized', 
+        message: 'Personal Access Token has been revoked.'
+      });
+    }
 
-// Client admin endpoints
-app.get('/admin/clients', (req, res) => {
-  // We only send the client IDs (keys of the map), not the secrets.
-  const clientIds = Array.from(clients.keys());
-  res.status(200).json(clientIds);
+    req.auth = decoded;
+    return next();
+  });
+};
+
+const authorizeRole = (requiredRole) => (req, res, next) => {
+  // Ensure req.auth and req.auth.roles exist before checking
+  if (!authHasRequiredRole(req.auth, requiredRole)) {
+    return res.status(403).json({
+      error: 'forbidden',
+      message: `Requires '${requiredRole}' role.`
+    });
+  }
+  return next();
+};
+
+// In-Memory Data Initialization (Hardcoded for Demo)
+
+users.set('testuser', { 
+  id: 'user1',
+  username: 'testuser', 
+  passwordHash: sha256('password123'), 
+  roles: ['user']
+});
+users.set('adminuser', { 
+  id: 'user2',
+  username: 'adminuser',
+  passwordHash: sha256('adminpass'),
+  roles: ['user', 'admin']
 });
 
-app.delete('/admin/clients/:clientId', (req, res) => {
-  const clientIdToDelete = req.params.clientId;
-
-  // Delete the client from the 'clients' Map
-  const wasDeleted = clients.delete(clientIdToDelete);
-
-  if (wasDeleted) {
-    console.log(`Deleted credentials for Client ID: ${clientIdToDelete}`);
-    res.status(204).send(); // No Content, successful deletion
-  } else {
-    console.log(`Client ID not found for deletion: ${clientIdToDelete}`);
-    res.status(404).json({ message: 'Client ID not found.' });
-  }
+clients.set('web-client-1', {
+  id: 'web-client-1',
+  secret: sha256('web-client-secret-1'), // Hashed secret
+  redirectUris: ['http://localhost:8080/oauth/callback/', 'http://localhost:8080/oauth/alt-callback/'], // Now an array
+  scopes: ['profile', 'read:data', 'write:data'],
+});
+clients.set('cli-client-1', {
+  id: 'cli-client-1',
+  secret: null, // This is a public client, secret is not used in PKCE flow
+  redirectUris: ['http://localhost:8080/cli/callback/'],
+  scopes: ['profile', 'read:data'],
+});
+clients.set('internal-service-client', {
+  id: 'internal-service-client',
+  secret: sha256('its-a-secret'), // Hashed secret
+  redirectUris: [], // M2M clients typically don't have redirect URIs
+  scopes: ['read:internal', 'write:internal'],
 });
 
-// Client Registration Endpoints
-app.post('/oauth/clients', (req, res) => {
-  const { name, redirectUris, scopes } = req.body;
 
-  if (!name || !redirectUris || !Array.isArray(redirectUris)) {
-    return res.status(400).json({ error: 'Invalid client registration' });
-  }
+// API Endpoints
 
-  const clientId = uuidv4();
-  const clientSecret = generateToken();
+app.get('/api/data/public', (req, res) => {
+  return res.json({ message: 'This is public data. Anyone can access it!' });
+});
 
-  const client = {
-    id: clientId,
-    secret: clientSecret,
-    name,
-    redirectUris,
-    scopes: scopes || Object.keys(SCOPES),
-    createdAt: new Date().toISOString()
-  };
-
-  clients.set(clientId, client);
-
-  res.json({
-    client_id: clientId,
-    client_secret: clientSecret,
-    name,
-    redirect_uris: redirectUris,
-    scopes: client.scopes
+app.get('/api/data/protected', authenticateJWT, (req, res) => {
+  return res.json({
+    message: 'This is protected data!',
+    data: `Accessed by ${req.auth.sub || req.auth.clientId} (sub or clientId from token)`,
+    tokenInfo: req.auth // Echoes the decoded JWT payload
   });
 });
 
-app.get('/oauth/clients', (req, res) => {
-  const clientList = Array.from(clients.values()).map(client => ({
-    client_id: client.id,
-    name: client.name,
-    redirect_uris: client.redirectUris,
-    scopes: client.scopes,
-    created_at: client.createdAt
-  }));
-  res.json(clientList);
+app.get('/api/data/admin', authenticateJWT, authorizeRole('admin'), (req, res) => {
+  return res.json({
+    message: 'Welcome, Admin! This is highly sensitive administrative data.',
+    data: `Accessed by ${req.auth.sub} (user ID from token)`,
+    tokenInfo: req.auth // Echoes the decoded JWT payload
+  });
 });
 
-// OAuth 2.0 Authorization Endpoint
-app.get('/oauth/authorize', (req, res) => {
-  const { client_id, redirect_uri, response_type, scope, state } = req.query;
+app.post('/api/pat/generate', authenticateJWT, (req, res) => {
+  const userId = req.auth.sub; // Comes from the decoded JWT provided by `mock-login` (in the demo UI context).
+  const { scope, expiresIn = '30d' } = req.body; // Default PAT validity is 30 days
 
-  // Validate required parameters
-  if (!client_id || !redirect_uri || response_type !== 'code') {
-    return res.status(400).json({ error: 'Invalid authorization request' });
+  // Ensure an authentication context exists from the middleware
+  if (!userId) {
+    return res.status(401).json({
+      error: 'unauthenticated_principal',
+      message: 'An authenticated principal is required to generate PATs.'
+    });
   }
 
-  // Validate client
-  const client = clients.get(client_id);
-  if (!client) {
-    return res.status(400).json({ error: 'Invalid client' });
-  }
-
-  // Validate redirect URI
-  if (!client.redirectUris.includes(redirect_uri)) {
-    return res.status(400).json({ error: 'Invalid redirect URI' });
-  }
-
-  // Validate scopes
-  if (!validateScope(scope, client.scopes)) {
-    return res.status(400).json({ error: 'Invalid scope' });
-  }
-
-  // In a real app, you'd redirect to a login page
-  // For demo purposes, we'll return a simple HTML form
-  const scopeList = scope ? scope.split(' ') : [];
-
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Authorize Application</title>
-      <style>
-        body {
-          font-family: Arial, sans-serif;
-          max-width: 500px;
-          margin: 50px auto;
-          padding: 20px;
-        }
-
-        .form-group {
-          margin-bottom: 15px;
-        }
-
-        label {
-          display: block;
-          margin-bottom: 5px;
-        }
-
-        input,
-        button {
-          padding: 8px;
-          width: 100%;
-        }
-
-        button {
-          background: #007bff;
-          color: white;
-          border: none;
-          cursor: pointer;
-        }
-
-        button:hover {
-          background: #0056b3;
-        }
-
-        .scopes {
-          background: #f8f9fa;
-          padding: 15px;
-          border-radius: 5px;
-        }
-      </style>
-    </head>
-    <body>
-      <h2>Authorize ${client.name}</h2>
-      <p>This application is requesting access to your account.</p>
-
-      <div class="scopes">
-        <h3>Requested Permissions:</h3>
-        <ul>
-          ${scopeList.map(s => `<li>${SCOPES[s] || s}</li>`).join('')}
-        </ul>
-      </div>
-
-      <form method="POST" action="/oauth/authorize">
-        <input type="hidden" name="client_id" value="${client_id}">
-        <input type="hidden" name="redirect_uri" value="${redirect_uri}">
-        <input type="hidden" name="response_type" value="${response_type}">
-        <input type="hidden" name="scope" value="${scope || ''}">
-        <input type="hidden" name="state" value="${state || ''}">
-
-        <div class="form-group">
-          <label for="username">Username:</label>
-          <input type="text" id="username" name="username" required>
-        </div>
-
-        <div class="form-group">
-          <label for="password">Password:</label>
-          <input type="password" id="password" name="password" required>
-        </div>
-
-        <button type="submit" name="action" value="authorize">Authorize</button>
-        <button type="submit" name="action" value="deny" style="background: #dc3545; margin-top: 10px;">Deny</button>
-      </form>
-    </body>
-    </html>
-  `);
-});
-
-// OAuth 2.0 Authorization POST Handler
-app.post('/oauth/authorize', async (req, res) => {
-  const { client_id, redirect_uri, response_type, scope, state, username, password, action } = req.body;
-
-  if (action === 'deny') {
-    const errorUrl = `${redirect_uri}?error=access_denied&state=${state || ''}`;
-    return res.redirect(errorUrl);
-  }
-
-  // Authenticate user
-  const user = users.find(u => u.username === username);
-  if (!user || !await bcrypt.compare(password, user.password)) {
-    return res.status(401).send('Invalid credentials');
-  }
-
-  // Generate authorization code
-  const code = generateToken();
-  const codeData = {
-    clientId: client_id,
-    userId: user.id,
-    redirectUri: redirect_uri,
+  // PAT payload includes user ID as subject and a 'type' for differentiation.
+  const patPayload = {
+    sub: userId,
+    type: TOKEN_TYPES.PAT,
     scopes: scope ? scope.split(' ') : [],
-    expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
+    roles: req.auth.roles
   };
+  const patToken = generateAccessToken(
+    patPayload,
+    expiresIn,
+    TOKEN_TYPES.PAT,
+    app.locals.privateKey,
+    JWT_ISSUER
+  );
 
-  authorizationCodes.set(code, codeData);
+  // Store the PAT's jti (JWT ID) in our in-memory map for later revocation checks.
+  const decodedPat = jwt.decode(patToken);
+  if (decodedPat && decodedPat.jti) {
+    personalAccessTokens.set(decodedPat.jti, {
+      userId,
+      scopes: patPayload.scopes,
+      expiresAt: decodedPat.exp * 1000 // Convert JWT exp (seconds) to milliseconds
+    });
+  }
 
-  // Redirect with authorization code
-  const redirectUrl = `${redirect_uri}?code=${code}&state=${state || ''}`;
-  res.redirect(redirectUrl);
+  return res.json({
+    message: 'Personal Access Token generated successfully.', 
+    pat: patToken
+  });
 });
 
-// OAuth 2.0 Token Endpoint
-app.post('/oauth/token', async (req, res) => {
-  const { grant_type, code, redirect_uri, client_id, client_secret, refresh_token } = req.body;
+app.delete('/api/pat/revoke/:patId', authenticateJWT, (req, res) => {
+  const userId = req.auth.sub; // User ID of the currently authenticated principal
+  const patIdToRevoke = req.params.patId; // The JTI (JWT ID) of the PAT to be revoked
 
-  if (grant_type === 'authorization_code') {
-    // Validate client
+  if (!userId) {
+    return res.status(401).json({
+      error: 'unauthenticated_principal',
+      message: 'An authenticated principal is required to revoke PATs.'
+    });
+  }
+
+  const patEntry = personalAccessTokens.get(patIdToRevoke);
+
+  // Check if PAT exists and if it belongs to the requesting principal
+  if (!patEntry) {
+    return res.status(404).json({
+      error: 'not_found',
+      message: 'Personal Access Token not found.'
+    });
+  }
+
+  // Prevent principals from revoking other principals' PATs
+  if (patEntry.userId !== userId) {
+    return res.status(403).json({ error: 'forbidden', message: 'You do not have permission to revoke this Personal Access Token.' });
+  }
+
+  // Remove the PAT from the active list, effectively revoking it
+  personalAccessTokens.delete(patIdToRevoke);
+  return res.json({
+    message: `Personal Access Token with ID ${patIdToRevoke} revoked successfully.`
+  });
+});
+
+// OAuth 2.0 Endpoints
+
+app.get('/oauth/authorize', (req, res) => {
+  const { query } = req;
+  const { scope: requestedScopeString } = query; // Extract requested scope string
+
+  // Validate required parameters for Authorization Code Grant with PKCE
+  if (!isValidAuthCodeRequest(query)) {
+    return res.status(400).json({
+      error: 'invalid_request',
+      error_description: 'Missing or invalid required parameters for Authorization Code Grant with PKCE.'
+    });
+  }
+
+  // Validate client and redirect URI
+  const client = clients.get(query.client_id);
+  if (!client || !client.redirectUris.includes(query.redirect_uri)) {
+    return res.status(400).json({
+      error: 'invalid_client',
+      error_description: 'Invalid client_id or redirect_uri.'
+    });
+  }
+
+  // Validate requested scopes against client's registered scopes
+  const requestedScopes = requestedScopeString ? requestedScopeString.split(' ') : [];
+  const invalidScopes = requestedScopes.filter(s => !client.scopes.includes(s));
+  if (invalidScopes.length > 0) {
+    return res.status(400).json({
+      error: 'invalid_scope',
+      error_description: `One or more requested scopes are invalid or not allowed for this client: ${invalidScopes.join(', ')}`
+    });
+  }
+
+  // --- DEMO SIMPLIFICATION: Auto-approve for 'testuser' ---
+  // In a real application, this would redirect the user to a login page if not authenticated,
+  // and then to a consent page where the user explicitly grants permissions (scopes).
+  // For this demo, we auto-authenticate 'testuser' and auto-approve the request.
+  const userId = 'user1'; // Using 'testuser' for automatic demonstration
+  const user = users.get(userId);
+  if (!user) {
+    return res.status(500).json({
+      error: 'server_error',
+      error_description: 'Demo user (user1) not found in in-memory store.'
+    });
+  }
+
+  // Generate a unique, short-lived authorization code
+  const authCode = generateSecureTokenString();
+  const expiresAt = Date.now() + 5 * 60 * 1000; // Code valid for 5 minutes (300 seconds)
+
+  // Store the authorization code with its associated details, including PKCE challenge
+  // Store the exact redirect_uri and the *validated* scopes that were used in this request for later validation
+  authorizationCodes.set(authCode, {
+    clientId: query.client_id,
+    userId: userId,
+    redirectUri: query.redirect_uri, // Store the specific redirect_uri used
+    codeChallenge: query.code_challenge,
+    codeChallengeMethod: query.code_challenge_method,
+    scopes: requestedScopes, // Store the VALIDATED requested scopes
+    expiresAt: expiresAt
+  });
+
+  // Redirect the user's browser back to the client's registered redirect URI
+  const redirectUrl = new URL(query.redirect_uri);
+  redirectUrl.searchParams.append('code', authCode);
+  if (query.state) {
+    redirectUrl.searchParams.append('state', query.state); // Include the state parameter if provided
+  }
+  console.log(`Authorization success. Redirecting to client: ${redirectUrl.toString()}`);
+  return res.redirect(redirectUrl.toString());
+});
+
+app.post('/oauth/token', (req, res) => {
+  const { grant_type, client_id, client_secret, redirect_uri, code, code_verifier, refresh_token: requestedRefreshToken } = req.body;
+
+  /*
+   * Grant Type Explanations:
+   *
+   * grant_type === 'authorization_code':
+   * Use Case: User-delegated authorization for web, mobile, and desktop applications.
+   * This flow is particularly important for public clients (e.g., SPAs, mobile apps, CLIs)
+   * that cannot securely store a client_secret.
+   * Details: This flow utilizes PKCE (Proof Key for Code Exchange) for client authentication
+   * at the token exchange. Instead of a static client_secret, the client generates a
+   * disposable, single-use code_verifier/code_challenge pair for each authorization attempt.
+   * The server validates this pair during the token exchange. It explicitly does NOT
+   * require or use a traditional client_secret for the client at this token endpoint.
+   *
+   * grant_type === 'refresh_token':
+   * Use Case: Obtaining a new access token without re-authentication when the current
+   * access token expires. Improves user experience and security by allowing
+   * short-lived access tokens.
+   * Details: This flow relies on the validity of the refresh token itself and the client_id.
+   * It does not require or use a client_secret in our implementation.
+   *
+   * grant_type === 'client_credentials':
+   * Use Case: Machine-to-machine (M2M) communication, where a client application
+   * accesses its own protected resources, not on behalf of an end-user.
+   * Often used for API Key concepts.
+   * Details: The client_secret is essential here. It's used to authenticate the
+   * client application directly for M2M access.
+   */
+  if (grant_type === 'authorization_code') { // (with PKCE)
+    // Used by web, CLI, and desktop applications for user-delegated access.
+    if (!isValidAuthCodeTokenRequest(req.body)) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'Missing parameters for authorization_code grant.' });
+    }
+
     const client = clients.get(client_id);
-    if (!client || client.secret !== client_secret) {
-      return res.status(401).json({ error: 'Invalid client credentials' });
+    const storedAuthCode = authorizationCodes.get(code);
+
+    // Invalidate the code immediately if it's invalid or expired to prevent replay attacks
+    if (!isValidStoredAuthCode(storedAuthCode, client, redirect_uri)) {
+      if (storedAuthCode) authorizationCodes.delete(code);
+      return res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'Invalid, expired, or previously used authorization code or redirect_uri mismatch.'
+      });
     }
 
-    // Validate authorization code
-    const codeData = authorizationCodes.get(code);
-    if (!codeData || codeData.expiresAt < Date.now() || codeData.clientId !== client_id || codeData.redirectUri !== redirect_uri) {
-      return res.status(400).json({ error: 'Invalid authorization code' });
+    // PKCE validation: Verify the code_verifier against the stored code_challenge
+    // Invalidate the authorization code on PKCE mismatch for security
+    const calculatedCodeChallenge = generateCodeChallenge(code_verifier);
+    if (calculatedCodeChallenge !== storedAuthCode.codeChallenge) {
+      authorizationCodes.delete(code);
+      return res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'PKCE code_verifier mismatch.'
+      });
     }
 
-    // Remove used code
+    // Code consumed, remove it to ensure single-use
     authorizationCodes.delete(code);
 
-    // Get user
-    const user = users.find(u => u.id === codeData.userId);
+    const user = users.get(storedAuthCode.userId);
     if (!user) {
-      return res.status(400).json({ error: 'User not found' });
+      return res.status(500).json({
+        error: 'server_error',
+        error_description: 'User associated with authorization code not found.'
+      });
     }
 
-    // Generate tokens
-    const accessToken = generateToken();
-    const refreshTokenValue = generateToken();
+    const newAccessToken = generateAccessToken(
+      { sub: user.id, roles: user.roles, scopes: storedAuthCode.scopes },
+      '1h',
+      TOKEN_TYPES.OAUTH,
+      app.locals.privateKey,
+      JWT_ISSUER
+    );
+    const newRefreshToken = generateSecureTokenString();
 
-    // Store tokens
-    accessTokens.set(accessToken, {
-      user: { id: user.id, username: user.username, email: user.email, name: user.name },
-      scopes: codeData.scopes,
-      expiresAt: Date.now() + 60 * 60 * 1000 // 1 hour
-    });
-
-    refreshTokens.set(refreshTokenValue, {
+    // Store the new refresh token with its associated details
+    refreshTokens.set(newRefreshToken, {
       userId: user.id,
       clientId: client_id,
-      scopes: codeData.scopes,
-      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days
+      scopes: storedAuthCode.scopes,
+      expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 // valid for 7 days
     });
 
-    res.json({
-      access_token: accessToken,
+    return res.json({
+      access_token: newAccessToken,
       token_type: 'Bearer',
-      expires_in: 3600,
-      refresh_token: refreshTokenValue,
-      scope: codeData.scopes.join(' ')
+      expires_in: 3600, // valid for 1 hour (in seconds)
+      refresh_token: newRefreshToken,
+      scope: storedAuthCode.scopes.join(' ') // Return granted scopes
     });
-
-  } else if (grant_type === 'refresh_token') {
-    const refreshData = refreshTokens.get(refresh_token);
-    if (!refreshData || refreshData.expiresAt < Date.now()) {
-      return res.status(400).json({ error: 'Invalid refresh token' });
+  }
+  else if (grant_type === 'refresh_token') {
+    // Used by applications to obtain a new access token without re-authentication.
+    if (!isValidRefreshTokenRequest(req.body)) {
+      return res.status(400).json({
+        error: 'invalid_request',
+        error_description: 'Missing refresh_token or client_id for refresh_token grant.'
+      });
     }
 
-    // Validate client
-    const client = clients.get(client_id);
-    if (!client || client.secret !== client_secret || refreshData.clientId !== client_id) {
-      return res.status(401).json({ error: 'Invalid client credentials' });
+    const storedRefreshToken = refreshTokens.get(requestedRefreshToken);
+
+    // Validate refresh token and its expiration, and ensure it belongs to the requesting client
+    // Invalidate the token if invalid or expired
+    if (!isValidStoredRefreshToken(storedRefreshToken, client_id)) {
+      if (storedRefreshToken) refreshTokens.delete(requestedRefreshToken);
+      return res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'Invalid or expired refresh token.'
+      });
     }
 
-    // Get user
-    const user = users.find(u => u.id === refreshData.userId);
+    refreshTokens.delete(requestedRefreshToken); // Invalidate the old refresh token
+
+    const user = users.get(storedRefreshToken.userId);
     if (!user) {
-      return res.status(400).json({ error: 'User not found' });
+      return res.status(500).json({
+        error: 'server_error',
+        error_description: 'User associated with refresh token not found.'
+      });
     }
 
-    // Generate new access token
-    const accessToken = generateToken();
-    accessTokens.set(accessToken, {
-      user: { id: user.id, username: user.username, email: user.email, name: user.name },
-      scopes: refreshData.scopes,
-      expiresAt: Date.now() + 60 * 60 * 1000 // 1 hour
+    const newAccessToken = generateAccessToken(
+      { sub: user.id, roles: user.roles, scopes: storedRefreshToken.scopes },
+      '1h',
+      TOKEN_TYPES.OAUTH,
+      app.locals.privateKey,
+      JWT_ISSUER
+    );
+    const newRefreshToken = generateSecureTokenString();
+
+    // Store the new refresh token
+    refreshTokens.set(newRefreshToken, {
+      userId: user.id,
+      clientId: client_id,
+      scopes: storedRefreshToken.scopes,
+      expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 // valid for 7 days
     });
 
-    res.json({
-      access_token: accessToken,
+    return res.json({
+      access_token: newAccessToken,
       token_type: 'Bearer',
-      expires_in: 3600,
-      scope: refreshData.scopes.join(' ')
+      expires_in: 3600, // valid for 1 hour
+      refresh_token: newRefreshToken,
+      scope: storedRefreshToken.scopes.join(' ') // Return granted scopes
     });
+  }
+  else if (grant_type === 'client_credentials') { // (for API Keys / M2M communication) ---
+    // Used by applications or services to obtain a JWT access token directly, without user involvement.
+    if (!isValidClientCredentialsRequest(req.body)) {
+      return res.status(400).json({
+        error: 'invalid_request',
+        error_description: 'Missing client_id or client_secret for client_credentials grant.'
+      });
+    }
 
-  } else {
-    res.status(400).json({ error: 'Unsupported grant type' });
+    // Validate client credentials
+    const client = clients.get(client_id);
+    if (!isValidClientCredentials(client, client_secret)) {
+      return res.status(401).json({
+        error: 'invalid_client',
+        error_description: 'Invalid client credentials.'
+      });
+    }
+
+    // Generate an access token for the client (representing the API Key concept).
+    // The 'sub' claim will be the client's ID, indicating it's an application token.
+    const newAccessToken = generateAccessToken(
+      { sub: client.id, clientId: client.id, scopes: client.scopes },
+      '24h',
+      TOKEN_TYPES.API_KEY,
+      app.locals.privateKey,
+      JWT_ISSUER
+    );
+    return res.json({
+      access_token: newAccessToken,
+      token_type: 'Bearer',
+      expires_in: 86400, // 24 hours (in seconds)
+      scope: client.scopes.join(' ') // Return granted scopes
+    });
+  }
+  else {
+    return res.status(400).json({
+      error: 'unsupported_grant_type',
+      error_description: 'The requested grant type is not supported.'
+    });
   }
 });
 
-// OAuth 2.0 Token Introspection Endpoint
-app.post('/oauth/introspect', (req, res) => {
-  const { token } = req.body;
+// Admin pages
 
-  const tokenData = accessTokens.get(token);
-  if (!tokenData || tokenData.expiresAt < Date.now()) {
-    return res.json({ active: false });
+app.get('/admin-panel', (req, res) => {
+  return res.sendFile(path.join(__dirname, 'public', 'admin-panel.html'));
+});
+
+app.get('/admin/register-client', authenticateJWT, authorizeRole('admin'), (req, res) => {
+  return res.sendFile(path.join(__dirname, 'public', 'register-client.html'));
+});
+
+app.post('/admin/register-client', authenticateJWT, authorizeRole('admin'), (req, res) => {
+  const { client_name, redirect_uris, scopes, client_type } = req.body;
+
+  // Basic validation
+  if (!client_name || !redirect_uris || !scopes || !client_type) {
+    return res.status(400).json({
+      error: 'invalid_request',
+      message: 'Missing required client registration fields.'
+    });
   }
 
-  res.json({
-    active: true,
-    client_id: 'unknown', // We'd need to track this
-    username: tokenData.user.username,
-    scope: tokenData.scopes.join(' '),
-    exp: Math.floor(tokenData.expiresAt / 1000),
-    sub: tokenData.user.id
+  if (!['public', 'confidential'].includes(client_type)) {
+    return res.status(400).json({ 
+      error: 'invalid_client_type',
+      message: 'Client type must be "public" or "confidential".'
+    });
+  }
+
+  const parsedRedirectUris = redirect_uris.split(/[\s,]+/).filter(uri => uri.length > 0);
+  const parsedScopes = scopes.split(/[\s,]+/).filter(scope => scope.length > 0);
+
+  if (parsedRedirectUris.length === 0) {
+    return res.status(400).json({
+      error: 'invalid_redirect_uris',
+      message: 'At least one redirect URI is required.'
+    });
+  }
+
+  if (parsedScopes.length === 0) {
+    return res.status(400).json({
+      error: 'invalid_scopes',
+      message: 'At least one scope is required.'
+    });
+  }
+
+  // Generate unique client ID
+  const clientId = `client-${crypto.randomBytes(8).toString('hex')}`;
+  let clientSecret = null;
+
+  if (client_type === 'confidential') {
+    clientSecret = crypto.randomBytes(16).toString('hex'); // Generate a plain-text secret
+    clients.set(clientId, {
+      id: clientId,
+      secret: sha256(clientSecret), // Store hashed secret
+      redirectUris: parsedRedirectUris,
+      scopes: parsedScopes,
+      name: client_name, // Store client name for display
+      type: client_type
+    });
+  }
+  else { // public client
+    clients.set(clientId, {
+      id: clientId,
+      secret: null, // Public clients do not have a secret
+      redirectUris: parsedRedirectUris, // Fixed typo here
+      scopes: parsedScopes,
+      name: client_name,
+      type: client_type
+    });
+  }
+
+  console.log(`New client registered: ${clientId}, Type: ${client_type}`);
+  return res.status(201).json({
+    message: 'Client registered successfully.',
+    client_id: clientId,
+    client_secret: clientSecret, // Only return if confidential, otherwise null
+    client_type: client_type,
+    redirect_uris: parsedRedirectUris,
+    scopes: parsedScopes
   });
 });
 
-// Users API
-app.get('/api/users', (req, res) => {
-  const publicUsers = users.map(u => ({
-    id: u.id,
-    username: u.username,
-    name: u.name
-  }));
-  res.json(publicUsers);
+// Main pages
+
+app.get('/', (req, res) => {
+  return res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.get('/api/users/:id', (req, res) => {
-  const user = users.find(u => u.id === req.params.id);
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
+app.get('/pat-management', (req, res) => {
+  return res.sendFile(path.join(__dirname, 'public', 'pat-management.html'));
+});
+
+// Mock Login Endpoint for UI (for PAT generation demo on public/index.html)
+// This is a simplified endpoint for the demo UI to simulate a user login
+// and provide a short-lived user token, which can then be used to generate PATs.
+// It is NOT part of the standard OAuth flow.
+app.post('/mock-login', (req, res) => {
+  const { username, password } = req.body;
+  const user = users.get(username);
+
+  // Verify user credentials
+  if (user && user.passwordHash === sha256(password)) {
+    // Generate a basic JWT for the 'logged-in' user.
+    // This token is just for the context of managing PATs within the demo UI.
+    const userJwt = generateAccessToken(
+      { sub: user.id, roles: user.roles },
+      '15m',
+      TOKEN_TYPES.MOCK_LOGIN,
+      app.locals.privateKey,
+      JWT_ISSUER
+    );
+    return res.json({
+      message: 'Mock login successful!',
+      userToken: userJwt,
+      userId: user.id
+    });
   }
-
-  res.json({
-    id: user.id,
-    username: user.username,
-    name: user.name,
-    email: user.email
-  });
-});
-
-app.get('/api/me', authenticateToken, requireScope('read:profile'), (req, res) => {
-  res.json(req.user);
-});
-
-app.put('/api/me', authenticateToken, requireScope('write:profile'), (req, res) => {
-  const { name, email } = req.body;
-  const user = users.find(u => u.id === req.user.id);
-
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
+  else {
+    return res.status(401).json({
+      error: 'invalid_credentials',
+      message: 'Invalid username or password.'
+    });
   }
-
-  if (name) user.name = name;
-  if (email) user.email = email;
-
-  res.json({
-    id: user.id,
-    username: user.username,
-    name: user.name,
-    email: user.email
-  });
 });
 
-// Books API
-app.get('/api/books', (req, res) => {
-  res.json(books);
-});
-
-app.get('/api/books/:id', (req, res) => {
-  const book = books.find(b => b.id === req.params.id);
-  if (!book) {
-    return res.status(404).json({ error: 'Book not found' });
-  }
-  res.json(book);
-});
-
-app.get('/api/my-books', authenticateToken, requireScope('read:books'), (req, res) => {
-  const userBooks = books.filter(b => b.userId === req.user.id);
-  res.json(userBooks);
-});
-
-app.post('/api/books', authenticateToken, requireScope('write:books'), (req, res) => {
-  const { title, author } = req.body;
-
-  if (!title || !author) {
-    return res.status(400).json({ error: 'Title and author are required' });
-  }
-
-  const book = {
-    id: (books.length + 1).toString(),
-    title,
-    author,
-    userId: req.user.id
-  };
-
-  books.push(book);
-  res.status(201).json(book);
-});
-
-app.put('/api/books/:id', authenticateToken, requireScope('write:books'), (req, res) => {
-  const bookIndex = books.findIndex(b => b.id === req.params.id);
-
-  if (bookIndex === -1) {
-    return res.status(404).json({ error: 'Book not found' });
-  }
-
-  // Users can only edit their own books
-  if (books[bookIndex].userId !== req.user.id) {
-    return res.status(403).json({ error: 'Not authorized to edit this book' });
-  }
-
-  const { title, author } = req.body;
-  if (title) books[bookIndex].title = title;
-  if (author) books[bookIndex].author = author;
-
-  res.json(books[bookIndex]);
-});
-
-app.delete('/api/books/:id', authenticateToken, requireScope('write:books'), (req, res) => {
-  const bookIndex = books.findIndex(b => b.id === req.params.id);
-
-  if (bookIndex === -1) {
-    return res.status(404).json({ error: 'Book not found' });
-  }
-
-  // Users can only delete their own books
-  if (books[bookIndex].userId !== req.user.id) {
-    return res.status(403).json({ error: 'Not authorized to delete this book' });
-  }
-
-  books.splice(bookIndex, 1);
-  res.status(204).send();
-});
-
-// Admin interface for client registration
-app.get('/admin', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>OAuth Client Credentials Manager</title>
-      <!-- Tailwind CSS for styling -->
-      <script src="https://cdn.tailwindcss.com"></script>
-      <style>
-        /* Custom styles for Inter font */
-        body {
-          font-family: "Inter", sans-serif;
-        }
-        /* Hide the success message after some time */
-        .fade-out {
-          opacity: 0;
-          transition: opacity 0.5s ease-out;
-        }
-        /* Custom modal styles */
-        .modal-overlay {
-          position: fixed;
-          top: 0;
-          left: 0;
-          width: 100%;
-          height: 100%;
-          background: rgba(0, 0, 0, 0.6);
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          z-index: 1000;
-        }
-        .modal-content {
-          background: white;
-          padding: 2rem;
-          border-radius: 0.75rem;
-          box-shadow: 0 10px 15px rgba(0, 0, 0, 0.1);
-          width: 90%;
-          max-width: 400px;
-          text-align: center;
-        }
-      </style>
-    </head>
-    <body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
-      <div class="bg-white rounded-lg shadow-xl p-8 w-full max-w-2xl">
-        <h1 class="text-3xl font-bold text-gray-800 mb-6 text-center">OAuth Client Credentials</h1>
-
-        <!-- Generate Credentials Section -->
-        <div class="mb-8 p-6 bg-blue-50 rounded-lg border border-blue-200">
-          <h2 class="text-2xl font-semibold text-blue-800 mb-4">Generate New Credentials</h2>
-          <p class="text-gray-700 mb-4">Enter client details below to generate new credentials.</p>
-
-          <div class="mb-4">
-            <label for="clientNameInput" class="block text-sm font-medium text-gray-700 mb-1">Client Name:</label>
-            <input type="text" id="clientNameInput" placeholder="e.g., My Web App" class="w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
-          </div>
-
-          <div class="mb-6">
-            <label for="redirectUrisInput" class="block text-sm font-medium text-gray-700 mb-1">Redirect URIs (comma-separated):</label>
-            <textarea id="redirectUrisInput" rows="3" placeholder="e.g., https://myapp.com/callback, http://localhost:3000/auth" class="w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
-          </div>
-
-          <button id="generateCredsBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105 w-full">
-            Generate Credentials
-          </button>
-        </div>
-
-        <!-- Display Generated Credentials Section -->
-        <div id="generatedCredsDisplay" class="mb-8 p-6 bg-green-50 rounded-lg border border-green-200 hidden">
-          <h2 class="text-2xl font-semibold text-green-800 mb-4">Your New Credentials</h2>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label for="clientId" class="block text-sm font-medium text-gray-700 mb-1">Client ID:</label>
-              <div class="flex items-center">
-                <input type="text" id="clientId" readonly class="flex-grow p-2 border border-gray-300 rounded-md bg-gray-50 text-gray-800 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-green-500 mr-2">
-                <button onclick="copyToClipboard('clientId')" class="bg-gray-200 hover:bg-gray-300 text-gray-700 py-2 px-3 rounded-md text-sm font-medium transition duration-150">Copy</button>
-              </div>
-            </div>
-            <div>
-              <label for="clientSecret" class="block text-sm font-medium text-gray-700 mb-1">Client Secret:</label>
-              <div class="flex items-center">
-                <input type="text" id="clientSecret" readonly class="flex-grow p-2 border border-gray-300 rounded-md bg-gray-50 text-gray-800 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-green-500 mr-2">
-                <button onclick="copyToClipboard('clientSecret')" class="bg-gray-200 hover:bg-gray-300 text-gray-700 py-2 px-3 rounded-md text-sm font-medium transition duration-150">Copy</button>
-              </div>
-            </div>
-          </div>
-          <div id="copySuccessMessage" class="text-green-600 text-sm mt-3 hidden">
-            <span class="font-semibold">&#10003; Copied to clipboard!</span>
-          </div>
-        </div>
-
-        <!-- List All Credentials Section -->
-        <div class="p-6 bg-purple-50 rounded-lg border border-purple-200">
-          <h2 class="text-2xl font-semibold text-purple-800 mb-4">Existing Credentials</h2>
-          <p class="text-gray-700 mb-4">Below is a list of all Client IDs you have generated. Client Secrets are not displayed for security reasons.</p>
-          <ul id="credentialsList" class="space-y-3">
-            <!-- Credentials will be loaded here by JavaScript -->
-          </ul>
-          <p id="noCredsMessage" class="text-gray-500 text-center mt-4 hidden">No credentials generated yet.</p>
-        </div>
-      </div>
-
-      <!-- Custom Confirmation Modal -->
-      <div id="confirmationModal" class="modal-overlay hidden">
-        <div class="modal-content">
-          <p id="modalMessage" class="text-gray-800 text-lg mb-6"></p>
-          <div class="flex justify-center space-x-4">
-            <button id="confirmDeleteBtn" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-300">Delete</button>
-            <button id="cancelDeleteBtn" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded-lg shadow-md transition duration-300">Cancel</button>
-          </div>
-        </div>
-      </div>
-
-      <script>
-        document.addEventListener('DOMContentLoaded', () => {
-          const generateCredsBtn = document.getElementById('generateCredsBtn');
-          const clientNameInput = document.getElementById('clientNameInput');
-          const redirectUrisInput = document.getElementById('redirectUrisInput');
-          const generatedCredsDisplay = document.getElementById('generatedCredsDisplay');
-          const clientIdInput = document.getElementById('clientId');
-          const clientSecretInput = document.getElementById('clientSecret');
-          const credentialsList = document.getElementById('credentialsList');
-          const noCredsMessage = document.getElementById('noCredsMessage');
-          const copySuccessMessage = document.getElementById('copySuccessMessage');
-
-          // Modal elements
-          const confirmationModal = document.getElementById('confirmationModal');
-          const modalMessage = document.getElementById('modalMessage');
-          const confirmDeleteBtn = document.getElementById('confirmDeleteBtn');
-          const cancelDeleteBtn = document.getElementById('cancelDeleteBtn');
-
-          let currentClientIdToDelete = null; // To hold the ID of the credential being considered for deletion
-
-          // Function to show the custom confirmation modal
-          function showConfirmationModal(message, clientId) {
-            modalMessage.textContent = message;
-            currentClientIdToDelete = clientId;
-            confirmationModal.classList.remove('hidden');
-          }
-
-          // Function to hide the custom confirmation modal
-          function hideConfirmationModal() {
-            confirmationModal.classList.add('hidden');
-            currentClientIdToDelete = null;
-          }
-
-          // Event listener for confirm button in modal
-          confirmDeleteBtn.addEventListener('click', async () => {
-            if (currentClientIdToDelete) {
-              try {
-                // Now using the new /admin/clients endpoint for deletion
-                const response = await fetch(\`/admin/clients/\${currentClientIdToDelete}\`, {
-                  method: 'DELETE'
-                });
-
-                if (response.ok) {
-                  console.log('Credential deleted successfully on server.');
-                  await fetchAndDisplayCredentials(); // Refresh the list
-                } else if (response.status === 404) {
-                  console.error('Credential not found on server.');
-                  alert('Error: Credential not found.');
-                } else {
-                  console.error('Failed to delete credential on server.');
-                  alert('Error: Failed to delete credential. Please try again.');
-                }
-              } catch (error) {
-                console.error('Network error while deleting credential:', error);
-                alert('Network error: Could not connect to the server.');
-              } finally {
-                hideConfirmationModal();
-              }
-            }
-          });
-
-          // Event listener for cancel button in modal
-          cancelDeleteBtn.addEventListener('click', hideConfirmationModal);
-
-          // Function to add a credential ID to the list
-          function addCredentialToList(credId) {
-            const listItem = document.createElement('li');
-            listItem.className = 'bg-white p-3 rounded-md shadow-sm flex justify-between items-center border border-gray-200';
-            listItem.innerHTML = \`
-              <span class="font-mono text-gray-800 text-sm break-all">\${credId}</span>
-              <button onclick="window.deleteCred('\${credId}')" class="text-red-500 hover:text-red-700 text-sm font-medium ml-4 shrink-0">Delete</button>
-            \`;
-            credentialsList.prepend(listItem); // Add to the top of the list
-          }
-
-          // Function to initiate deletion (called from onclick)
-          window.deleteCred = function(credIdToDelete) {
-            showConfirmationModal(\`Are you sure you want to delete credentials for: \${credIdToDelete}?\`, credIdToDelete);
-          };
-
-          // Function to update the visibility of the "No credentials" message
-          function updateNoCredsMessage() {
-            if (credentialsList.children.length === 0) {
-              noCredsMessage.classList.remove('hidden');
-            } else {
-              noCredsMessage.classList.add('hidden');
-            }
-          }
-
-          // Function to fetch and display all existing credentials
-          async function fetchAndDisplayCredentials() {
-            credentialsList.innerHTML = ''; // Clear current list
-            try {
-              // Now using the new /admin/clients endpoint for listing
-              const response = await fetch('/admin/clients');
-              if (!response.ok) {
-                throw new Error(\`HTTP error! status: \${response.status}\`);
-              }
-              const data = await response.json(); // Expects an array of client IDs
-              if (data.length > 0) {
-                data.forEach(credId => addCredentialToList(credId));
-              }
-            } catch (error) {
-              console.error('Error fetching credentials:', error);
-              // Optionally display an error message to the user
-            } finally {
-              updateNoCredsMessage();
-            }
-          }
-
-          // Fetch and display credentials on initial load
-          fetchAndDisplayCredentials();
-
-          // Event listener for the "Generate Credentials" button
-          generateCredsBtn.addEventListener('click', async () => {
-            const clientName = clientNameInput.value.trim();
-            const redirectUrisString = redirectUrisInput.value.trim();
-            const redirectUris = redirectUrisString ? redirectUrisString.split(',').map(uri => uri.trim()) : [];
-
-            if (!clientName) {
-              alert('Please enter a Client Name.');
-              return;
-            }
-
-            try {
-              // NOW HITTING YOUR EXISTING /oauth/clients endpoint for creation
-              const response = await fetch('/oauth/clients', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                  name: clientName,
-                  redirectUris: redirectUris
-                })
-              });
-
-              if (!response.ok) {
-                const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
-                throw new Error(\`HTTP error! status: \${response.status}, message: \${errorData.message || response.statusText}\`);
-              }
-              const data = await response.json(); 
-
-              // Display the generated credentials
-              // CRUCIAL CHANGE: Use data.client_id and data.client_secret
-              clientIdInput.value = data.client_id;
-              clientSecretInput.value = data.client_secret;
-              generatedCredsDisplay.classList.remove('hidden');
-
-              // Clear the input fields after successful generation
-              clientNameInput.value = '';
-              redirectUrisInput.value = '';
-
-              // Refresh the list to include the newly generated credential
-              await fetchAndDisplayCredentials();
-
-              // Scroll to the top of the generated credentials display section for visibility
-              generatedCredsDisplay.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-            } catch (error) {
-              console.error('Error generating credentials:', error);
-              alert('Failed to generate credentials. Please try again. Error: ' + error.message);
-            }
-          });
-
-          // Global function to copy text to clipboard
-          window.copyToClipboard = function(elementId) {
-            const element = document.getElementById(elementId);
-            if (element) {
-              element.select(); // Select the text in the input field
-              element.setSelectionRange(0, 99999); // For mobile devices
-
-              try {
-                document.execCommand('copy'); // Execute the copy command
-                copySuccessMessage.classList.remove('hidden');
-                copySuccessMessage.classList.remove('fade-out'); // Ensure it's fully visible
-                setTimeout(() => {
-                  copySuccessMessage.classList.add('fade-out');
-                  setTimeout(() => {
-                    copySuccessMessage.classList.add('hidden'); // Hide after fade out
-                  }, 500); // Match fade-out transition duration
-                }, 2000); // Show message for 2 seconds
-              } catch (err) {
-                console.error('Failed to copy text: ', err);
-                // Fallback: You could notify the user to copy manually
-              }
-            }
-          };
-        });
-      </script>
-    </body>
-    </html>
-  `);
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`OAuth API Server running on port ${PORT}`);
-  console.log(`Admin interface: http://localhost:${PORT}/admin`);
-  console.log(`\nSample users:`);
-  console.log(`- Username: john_doe, Password: password123`);
-  console.log(`- Username: jane_smith, Password: password123`);
+// Start the server and provide initial setup instructions.
+app.listen(port, () => {
+  console.log(`Unified JWT Authentication Demo API listening at http://localhost:${port}`);
+  console.log(`
+    --- Setup Instructions ---
+    1. Ensure 'private.pem' and 'public.pem' are in the same directory as server.js.
+       If they don't exist, generate them using OpenSSL commands in your terminal:
+       - Generate a private key:
+         openssl genpkey -algorithm RSA -out private.pem -pkeyopt rsa_keygen_bits:2048
+       - Extract the public key:
+         openssl rsa -pubout -in private.pem -out public.pem
+    2. Run the server: node server.js
+    3. Visit http://localhost:${port} in your browser to start the demo.
+    4. The mock-login uses 'testuser'/'password123' and 'adminuser'/'adminpass' for demo purposes.
+    5. To set a custom issuer (e.g., for production): export JWT_ISSUER="https://your.auth.domain.com"
+    `);
 });

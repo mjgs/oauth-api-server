@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: "Inter", sans-serif; }
+        .container { max-width: 800px; }
+        .token-display {
+            background-color: #e2e8f0; /* Light gray-blue */
+            padding: 12px;
+            border-radius: 8px;
+            word-break: break-all; /* Ensures long tokens wrap */
+            font-family: 'Roboto Mono', monospace; /* Monospaced font for tokens */
+            font-size: 0.85rem;
+            color: #2d3748; /* Darker gray for text */
+            white-space: pre-wrap; /* Preserve whitespace and wrap */
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
+    <div class="container bg-white p-8 rounded-lg shadow-xl w-full">
+        <h1 class="text-4xl font-extrabold text-gray-900 mb-6 text-center">Admin Panel</h1>
+        <p class="text-gray-700 mb-8 text-center text-lg">This panel is for administrative tasks and requires an 'admin' role.</p>
+
+        <div id="accessDenied" class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg relative mb-6 hidden" role="alert">
+            <strong class="font-bold">Access Denied:</strong>
+            <span class="block sm:inline">You must have an 'admin' role to access this page. Please use the 'adminuser' credentials from the <a href="/" class="underline text-blue-700 hover:text-blue-900">home page</a>'s mock login to get an admin token, and then manually paste it into the "Access API Endpoints Directly" section to call <code>/api/data/admin</code>. This page is purely illustrative in this demo.</span>
+        </div>
+
+        <div id="adminContent" class="space-y-8 hidden">
+            <div class="p-6 border border-indigo-300 rounded-xl bg-indigo-50 shadow-md">
+                <h2 class="text-2xl font-bold text-indigo-800 mb-4">Registered Users (Conceptual)</h2>
+                <p class="text-gray-700 mb-4 text-sm">In a real system, you would fetch and display a list of all registered users here.</p>
+                <ul class="list-disc list-inside text-gray-700 text-sm">
+                    <li>User ID: user1 (Username: testuser, Roles: user)</li>
+                    <li>User ID: user2 (Username: adminuser, Roles: user, admin)</li>
+                </ul>
+            </div>
+
+            <div class="p-6 border border-teal-300 rounded-xl bg-teal-50 shadow-md">
+                <h2 class="text-2xl font-bold text-teal-800 mb-4">Registered Clients</h2>
+                <p class="text-gray-700 mb-4 text-sm">This lists registered OAuth clients, including those used for API Keys (Client Credentials Grant).</p>
+                <ul id="registeredClientsList" class="list-disc list-inside text-gray-700 text-sm">
+                    <!-- Pre-populated clients, and dynamically added ones will appear here on refresh -->
+                    <li>Client ID: web-client-1 (Type: Confidential, Redirect: http://localhost:8080/oauth/callback/, http://localhost:8080/oauth/alt-callback/, Scopes: profile read:data write:data)</li>
+                    <li>Client ID: cli-client-1 (Type: Public, Redirect: http://localhost:8080/cli/callback/, Scopes: profile read:data)</li>
+                    <li>Client ID: internal-service-client (Type: Confidential, Purpose: API Key/M2M, Scopes: read:internal write:internal)</li>
+                    <li class="text-gray-600 mt-2">Note: Dynamically added clients will appear here after server restart or if a server-side API to list clients were implemented.</li>
+                </ul>
+            </div>
+
+            <div class="p-6 border border-gray-300 rounded-xl bg-gray-100 shadow-md">
+                <h2 class="text-2xl font-bold text-gray-800 mb-4">Register New API Client</h2>
+                <p class="text-gray-700 mb-4 text-sm">Admins can provision new OAuth clients (which can act as API Keys) here.</p>
+                <a href="/admin/register-client" class="block text-center bg-green-600 text-white p-3 rounded-lg hover:bg-green-700 transition duration-300 shadow-lg text-lg font-semibold">Go to Client Registration</a>
+            </div>
+        </div>
+
+        <a href="/" class="block text-center mt-8 text-blue-600 hover:underline">← Back to Home</a>
+    </div>
+
+    <script>
+        const userToken = sessionStorage.getItem('userToken'); // Get user token from mock login
+        const accessDeniedDiv = document.getElementById('accessDenied');
+        const adminContentDiv = document.getElementById('adminContent');
+
+        // Client-side check for admin role for UX, server performs actual auth
+        if (userToken) {
+            try {
+                const decoded = JSON.parse(atob(userToken.split('.')[1]));
+                if (decoded && decoded.roles && decoded.roles.includes('admin')) {
+                    adminContentDiv.classList.remove('hidden');
+                } else {
+                    accessDeniedDiv.classList.remove('hidden');
+                    accessDeniedDiv.querySelector('span').textContent = "You do not have administrative privileges to access this page.";
+                }
+            } catch (e) {
+                console.error("Error decoding token for admin panel display:", e);
+                accessDeniedDiv.classList.remove('hidden');
+                accessDeniedDiv.querySelector('span').textContent = "Your session token is invalid or corrupted. Please log in again.";
+            }
+        } else {
+            accessDeniedDiv.classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>

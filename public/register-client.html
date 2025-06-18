@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register New Client</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: "Inter", sans-serif; }
+        .container { max-width: 800px; }
+        .token-display {
+            background-color: #e2e8f0; /* Light gray-blue */
+            padding: 12px;
+            border-radius: 8px;
+            word-break: break-all; /* Ensures long tokens wrap */
+            font-family: 'Roboto Mono', monospace; /* Monospaced font for tokens */
+            font-size: 0.85rem;
+            color: #2d3748; /* Darker gray for text */
+            white-space: pre-wrap; /* Preserve whitespace and wrap */
+        }
+        .copy-button {
+            background-color: #4f46e5; /* Indigo */
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .copy-button:hover {
+            background-color: #4338ca; /* Darker indigo */
+        }
+        .copied-message {
+            margin-left: 8px;
+            font-size: 0.75rem;
+            color: #10b981; /* Green for success */
+            display: none; /* Hidden by default */
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
+    <div class="container bg-white p-8 rounded-lg shadow-xl w-full">
+        <h1 class="text-4xl font-extrabold text-gray-900 mb-6 text-center">Register New OAuth Client</h1>
+        <p class="text-gray-700 mb-8 text-center text-lg">Register a new client application to integrate with the API. This requires an admin token.</p>
+
+        <div id="authRequired" class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg relative mb-6 hidden" role="alert">
+            <strong class="font-bold">Access Denied:</strong>
+            <span class="block sm:inline">You must have an 'admin' role to access this page. Please go back to the <a href="/" class="underline text-blue-700 hover:text-blue-900">home page</a>, perform a mock login with 'adminuser' to get an admin token, and then ensure it's in your session storage.</span>
+        </div>
+
+        <div id="clientRegistrationContent" class="space-y-6 hidden">
+            <div class="p-6 border border-blue-300 rounded-xl bg-blue-50 shadow-md">
+                <h2 class="text-2xl font-bold text-blue-800 mb-4">Client Details</h2>
+                <div class="flex flex-col space-y-4">
+                    <div>
+                        <label for="clientName" class="block text-gray-700 text-sm font-bold mb-2">Client Name:</label>
+                        <input type="text" id="clientName" placeholder="e.g., My Awesome Web App" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 shadow-sm" required>
+                    </div>
+                    <div>
+                        <label for="redirectUris" class="block text-gray-700 text-sm font-bold mb-2">Redirect URIs (comma or space separated):</label>
+                        <textarea id="redirectUris" placeholder="e.g., http://localhost:8080/callback, https://my-app.com/callback" rows="3" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 shadow-sm" required></textarea>
+                    </div>
+                    <div>
+                        <label for="scopes" class="block text-gray-700 text-sm font-bold mb-2">Allowed Scopes (space separated):</label>
+                        <input type="text" id="scopes" value="profile read:data write:data" placeholder="e.g., profile read:data write:data" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 shadow-sm" required>
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 text-sm font-bold mb-2">Client Type:</label>
+                        <div class="flex items-center space-x-4">
+                            <input type="radio" id="typePublic" name="clientType" value="public" class="form-radio text-blue-600" checked>
+                            <label for="typePublic" class="text-gray-700">Public (e.g., SPAs, Mobile Apps - no secret)</label>
+                        </div>
+                        <div class="flex items-center space-x-4">
+                            <input type="radio" id="typeConfidential" name="clientType" value="confidential" class="form-radio text-blue-600">
+                            <label for="typeConfidential" class="text-gray-700">Confidential (e.g., Server-side Apps - with secret)</label>
+                        </div>
+                    </div>
+                    <button id="registerClientBtn" class="bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition duration-300 shadow-lg text-lg font-semibold">Register Client</button>
+                </div>
+                <p id="registrationStatus" class="mt-4 text-sm text-center text-gray-500"></p>
+                <div id="registeredClientDetails" class="mt-4 token-display hidden">
+                    <strong class="text-gray-700 block mb-2">Registered Client Details:</strong>
+                    <p class="text-gray-800"><strong>Client ID:</strong> <span id="displayClientId"></span></p>
+                    <p class="text-gray-800" id="displayClientSecretContainer"><strong>Client Secret:</strong> <span id="displayClientSecret"></span> <button class="copy-button ml-2" onclick="copyToClipboard('displayClientSecret', 'secretCopied')">Copy</button><span id="secretCopied" class="copied-message">Copied!</span><br><span class="text-xs text-red-500">Note: This secret is shown only once!</span></p>
+                    <p class="text-gray-800"><strong>Client Type:</strong> <span id="displayClientType"></span></p>
+                    <p class="text-gray-800"><strong>Redirect URIs:</strong> <span id="displayRedirectUris"></span></p>
+                    <p class="text-gray-800"><strong>Scopes:</strong> <span id="displayScopes"></span></p>
+                </div>
+            </div>
+        </div>
+
+        <a href="/admin-panel" class="block text-center mt-8 text-blue-600 hover:underline">← Back to Admin Panel</a>
+    </div>
+
+    <script>
+        const adminToken = sessionStorage.getItem('userToken'); // Assuming admin logs in via mock-login and token is stored
+        const authRequiredDiv = document.getElementById('authRequired');
+        const clientRegistrationContentDiv = document.getElementById('clientRegistrationContent');
+
+        // Simple client-side check for admin role for UX, server performs actual auth
+        if (!adminToken) {
+            authRequiredDiv.classList.remove('hidden');
+        } else {
+            try {
+                const decoded = JSON.parse(atob(adminToken.split('.')[1]));
+                if (decoded && decoded.roles && decoded.roles.includes('admin')) {
+                    clientRegistrationContentDiv.classList.remove('hidden');
+                } else {
+                    authRequiredDiv.classList.remove('hidden');
+                    authRequiredDiv.querySelector('span').textContent = "You do not have administrative privileges to access this page.";
+                }
+            } catch (e) {
+                console.error("Error decoding token for admin check:", e);
+                authRequiredDiv.classList.remove('hidden');
+                authRequiredDiv.querySelector('span').textContent = "Your session token is invalid or corrupted. Please log in again.";
+            }
+        }
+
+        document.getElementById('registerClientBtn').addEventListener('click', async () => {
+            const clientName = document.getElementById('clientName').value;
+            const redirectUris = document.getElementById('redirectUris').value;
+            const scopes = document.getElementById('scopes').value;
+            const clientType = document.querySelector('input[name="clientType"]:checked').value;
+            const registrationStatus = document.getElementById('registrationStatus');
+            const registeredClientDetails = document.getElementById('registeredClientDetails');
+
+            registrationStatus.textContent = 'Registering client...';
+            registrationStatus.className = 'mt-4 text-sm text-center text-gray-500';
+            registeredClientDetails.classList.add('hidden');
+
+            try {
+                const response = await fetch('/admin/register-client', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${adminToken}`
+                    },
+                    body: JSON.stringify({
+                        client_name: clientName,
+                        redirect_uris: redirectUris,
+                        scopes: scopes,
+                        client_type: clientType
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    registrationStatus.textContent = data.message;
+                    registrationStatus.className = 'mt-4 text-sm text-center text-green-600';
+                    document.getElementById('displayClientId').textContent = data.client_id;
+                    document.getElementById('displayClientType').textContent = data.client_type;
+                    document.getElementById('displayRedirectUris').textContent = (data.redirect_uris || []).join(', ');
+                    document.getElementById('displayScopes').textContent = (data.scopes || []).join(' ');
+
+                    const secretContainer = document.getElementById('displayClientSecretContainer');
+                    const secretValue = document.getElementById('displayClientSecret');
+
+                    if (data.client_secret) {
+                        secretValue.textContent = data.client_secret;
+                        secretContainer.classList.remove('hidden');
+                    } else {
+                        secretValue.textContent = 'N/A (Public Client)';
+                        secretContainer.classList.add('hidden'); // Hide copy button if no secret
+                    }
+                    registeredClientDetails.classList.remove('hidden');
+
+                } else {
+                    registrationStatus.textContent = `Error: ${data.error || data.message}`;
+                    registrationStatus.className = 'mt-4 text-sm text-center text-red-600';
+                }
+            } catch (error) {
+                registrationStatus.textContent = `Network error: ${error.message}`;
+                registrationStatus.className = 'mt-4 text-sm text-center text-red-600';
+            }
+        });
+
+        // Re-using the copyToClipboard function from index.html for consistency
+        function copyToClipboard(elementId, messageId) {
+            const element = document.getElementById(elementId);
+            const message = document.getElementById(messageId);
+            const textToCopy = element.textContent;
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(textToCopy).then(() => {
+                    message.style.display = 'inline';
+                    setTimeout(() => message.style.display = 'none', 2000);
+                }).catch(err => {
+                    console.error('Failed to copy text using Clipboard API:', err);
+                    fallbackCopyTextToClipboard(textToCopy, message);
+                });
+            } else {
+                fallbackCopyTextToClipboard(textToCopy, message);
+            }
+        }
+
+        function fallbackCopyTextToClipboard(text, messageElement) {
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.position = "fixed";
+            textArea.style.left = "-9999px";
+            textArea.style.top = "-9999px";
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            try {
+                document.execCommand('copy');
+                messageElement.style.display = 'inline';
+                setTimeout(() => messageElement.style.display = 'none', 2000);
+            } catch (err) {
+                console.error('Failed to copy text using execCommand:', err);
+                // alert('Failed to copy token. Please copy it manually.'); // Removed alert
+            }
+            document.body.removeChild(textArea);
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PAT Management</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: "Inter", sans-serif; }
+    .container { max-width: 800px; }
+    .token-display {
+      background-color: #e2e8f0; /* Light gray-blue */
+      padding: 12px;
+      border-radius: 8px;
+      word-break: break-all; /* Ensures long tokens wrap */
+      font-family: 'Roboto Mono', monospace; /* Monospaced font for tokens */
+      font-size: 0.85rem;
+      color: #2d3748; /* Darker gray for text */
+      white-space: pre-wrap; /* Preserve whitespace and wrap */
+    }
+    .copy-button {
+      background-color: #4f46e5; /* Indigo */
+      color: white;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+    .copy-button:hover {
+      background-color: #4338ca; /* Darker indigo */
+    }
+    .copied-message {
+      margin-left: 8px;
+      font-size: 0.75rem;
+      color: #10b981; /* Green for success */
+      display: none; /* Hidden by default */
+    }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
+  <div class="container bg-white p-8 rounded-lg shadow-xl w-full">
+    <h1 class="text-4xl font-extrabold text-gray-900 mb-6 text-center">Personal Access Token (PAT) Management</h1>
+    <p class="text-gray-700 mb-8 text-center text-lg">Generate and revoke PATs for your user account.</p>
+
+    <div id="authRequired" class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg relative mb-6 hidden" role="alert">
+      <strong class="font-bold">Authentication Required:</strong>
+      <span class="block sm:inline">Please go back to the <a href="/" class="underline text-blue-700 hover:text-blue-900">home page</a> and perform a mock login to get a user token before accessing this page.</span>
+    </div>
+
+    <div id="patManagementContent" class="space-y-8 hidden">
+      <!-- Generate New PAT Section -->
+      <div class="p-6 border border-blue-300 rounded-xl bg-blue-50 shadow-md">
+        <h2 class="text-2xl font-bold text-blue-800 mb-4">Generate New PAT</h2>
+        <p class="text-gray-700 mb-4 text-sm">Enter desired scopes (space-separated) and expiration for your new PAT.</p>
+        <div class="flex flex-col space-y-3">
+          <input type="text" id="patScope" value="read:data" placeholder="Scope (e.g., read:data write:data)" class="p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 shadow-sm">
+          <input type="text" id="patExpiresIn" value="30d" placeholder="Expires In (e.g., 1h, 30d, 1y)" class="p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 shadow-sm">
+          <button id="generatePatBtn" class="bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition duration-300 shadow-lg text-lg font-semibold">Generate PAT</button>
+        </div>
+        <p id="generatePatStatus" class="mt-4 text-sm text-center text-gray-500"></p>
+        <div id="generatedPatDisplay" class="mt-4 token-display hidden">
+          <strong class="text-gray-700 block mb-2">Generated PAT:</strong>
+          <span id="generatedPatValue" class="block text-gray-800"></span>
+          <button class="copy-button mt-2" onclick="copyToClipboard('generatedPatValue', 'generatedPatCopied')">Copy Token</button>
+          <span id="generatedPatCopied" class="copied-message">Copied!</span>
+        </div>
+      </div>
+
+      <!-- Existing PATs Section -->
+      <div class="p-6 border border-yellow-300 rounded-xl bg-yellow-50 shadow-md">
+        <h2 class="text-2xl font-bold text-yellow-800 mb-4">Your Active PATs</h2>
+        <p class="text-gray-700 mb-4 text-sm">This section will conceptually list your active PATs. Since this is an in-memory demo, you'll only see PATs generated in the current server session. A real system would persist these.</p>
+        <ul id="patList" class="space-y-4">
+          <li class="text-gray-600 text-center">No PATs generated yet in this session.</li>
+        </ul>
+      </div>
+    </div>
+
+    <a href="/" class="block text-center mt-8 text-blue-600 hover:underline">← Back to Home</a>
+  </div>
+
+  <script>
+    const userToken = sessionStorage.getItem('userToken');
+    const authRequiredDiv = document.getElementById('authRequired');
+    const patManagementContentDiv = document.getElementById('patManagementContent');
+
+    if (!userToken) {
+      authRequiredDiv.classList.remove('hidden');
+    } else {
+      patManagementContentDiv.classList.remove('hidden');
+      // Mock fetching existing PATs (in a real app, you'd call an API)
+      // For this demo, we can't truly 'list' active PATs that weren't generated in this session via this UI,
+      // as they are only in the server's memory by jti.
+      // This part is largely conceptual for the demo.
+      // displayActivePats(); // Call this if you had a /api/pat/list endpoint
+    }
+
+    document.getElementById('generatePatBtn').addEventListener('click', async () => {
+      const scope = document.getElementById('patScope').value;
+      const expiresIn = document.getElementById('patExpiresIn').value;
+      const generatePatStatus = document.getElementById('generatePatStatus');
+      const generatedPatDisplay = document.getElementById('generatedPatDisplay');
+      const generatedPatValue = document.getElementById('generatedPatValue');
+
+      generatePatStatus.textContent = 'Generating PAT...';
+      generatePatStatus.className = 'mt-4 text-sm text-center text-gray-500';
+      generatedPatDisplay.classList.add('hidden');
+      generatedPatValue.textContent = '';
+
+      try {
+        const response = await fetch('/api/pat/generate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${userToken}`
+          },
+          body: JSON.stringify({ scope, expiresIn })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          generatePatStatus.textContent = data.message;
+          generatePatStatus.className = 'mt-4 text-sm text-center text-green-600';
+          generatedPatValue.textContent = data.pat;
+          generatedPatDisplay.classList.remove('hidden');
+          addPatToList(data.pat); // Add newly generated PAT to the list
+        } else {
+          generatePatStatus.textContent = `Error: ${data.error || data.message}`;
+          generatePatStatus.className = 'mt-4 text-sm text-center text-red-600';
+        }
+      } catch (error) {
+        generatePatStatus.textContent = `Network error: ${error.message}`;
+        generatePatStatus.className = 'mt-4 text-sm text-center text-red-600';
+      }
+    });
+
+    function addPatToList(patToken) {
+      const patList = document.getElementById('patList');
+      // Decode the PAT to get its JTI and expiry for display
+      const decoded = decodeJwt(patToken);
+      if (!decoded || !decoded.jti) {
+        console.error("Failed to decode PAT or find JTI for listing.");
+        return;
+      }
+
+      // Remove "No PATs generated yet" message if present
+      if (patList.querySelector('li.text-center')) {
+        patList.innerHTML = '';
+      }
+
+      const listItem = document.createElement('li');
+      listItem.className = 'p-4 border border-yellow-200 rounded-lg bg-yellow-100 flex flex-col md:flex-row md:items-center justify-between shadow-sm';
+      listItem.innerHTML = `
+        <div class="flex-grow">
+          <p class="font-semibold text-gray-800">ID: <span class="font-mono text-xs">${decoded.jti}</span></p>
+          <p class="text-gray-700 text-sm mt-1">Scopes: <span class="font-mono text-xs">${(decoded.scopes || []).join(' ') || 'none'}</span></p>
+          <p class="text-gray-700 text-sm">Expires: <span class="font-mono text-xs">${new Date(decoded.exp * 1000).toLocaleString()}</span></p>
+        </div>
+        <button data-jti="${decoded.jti}" class="revoke-pat-btn bg-red-600 text-white p-2 rounded-md hover:bg-red-700 transition duration-300 shadow-md mt-3 md:mt-0 md:ml-4">Revoke</button>
+      `;
+      patList.appendChild(listItem);
+
+      // Add event listener to the new revoke button
+      listItem.querySelector('.revoke-pat-btn').addEventListener('click', revokePat);
+    }
+
+    async function revokePat(event) {
+      const jti = event.target.dataset.jti;
+      if (!confirm(`Are you sure you want to revoke PAT with ID: ${jti}?`)) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`/api/pat/revoke/${jti}`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${userToken}`
+          }
+        });
+
+        const data = await response.json();
+        if (response.ok) {
+          alert(data.message); // Using alert for simplicity in demo
+          event.target.closest('li').remove(); // Remove the PAT from the list
+          // If no PATs left, show the 'No PATs' message
+          if (document.getElementById('patList').children.length === 0) {
+            document.getElementById('patList').innerHTML = '<li class="text-gray-600 text-center">No PATs generated yet in this session.</li>';
+          }
+        } else {
+          alert(`Error revoking PAT: ${data.error || data.message}`); // Using alert for simplicity in demo
+        }
+      } catch (error) {
+        alert(`Network error: ${error.message}`); // Using alert for simplicity in demo
+      }
+    }
+
+    // Simple JWT decoder for display purposes only (not for security validation)
+    function decodeJwt(token) {
+      try {
+        const base64Url = token.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+          return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join(''));
+        return JSON.parse(jsonPayload);
+      } catch (e) {
+        console.error("Error decoding JWT:", e);
+        return null;
+      }
+    }
+
+    function copyToClipboard(elementId, messageId) {
+      const element = document.getElementById(elementId);
+      const message = document.getElementById(messageId);
+      const textToCopy = element.textContent;
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(textToCopy).then(() => {
+          message.style.display = 'inline';
+          setTimeout(() => message.style.display = 'none', 2000);
+        }).catch(err => {
+          console.error('Failed to copy text using Clipboard API:', err);
+          fallbackCopyTextToClipboard(textToCopy, message);
+        });
+      } else {
+        fallbackCopyTextToClipboard(textToCopy, message);
+      }
+    }
+
+    function fallbackCopyTextToClipboard(text, messageElement) {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-9999px";
+      textArea.style.top = "-9999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        messageElement.style.display = 'inline';
+        setTimeout(() => messageElement.style.display = 'none', 2000);
+      } catch (err) {
+        console.error('Failed to copy text using execCommand:', err);
+        alert('Failed to copy token. Please copy it manually.');
+      }
+      document.body.removeChild(textArea);
+    }
+  </script>
+</body>
+</html>
